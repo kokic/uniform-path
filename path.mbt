@@ -120,6 +120,8 @@ pub fn Path::join(self : Path, other : Path) -> Path {
 }
 
 ///|
+/// Equivalent to `join`: append the right-hand path's relative portion,
+/// ignoring its root and preserving the left-hand path's root.
 pub impl Div for Path with fn div(self : Path, other : Path) -> Path {
   self.join(other)
 }
