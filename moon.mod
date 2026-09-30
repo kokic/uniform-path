@@ -12,8 +12,8 @@ repository = "https://github.com/kokic/uniform-path"
 
 license = "Apache-2.0"
 
-keywords = []
+keywords = [ "path", "posix", "windows", "unc", "normalization" ]
 
-description = ""
+description = "Cross-platform paths with consistent / separators."
 
 preferred_target = "native"
