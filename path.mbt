@@ -15,8 +15,10 @@ priv enum PathRoot {
 /// Roots are stored separately so POSIX normalization cannot collapse UNC's
 /// leading `//` or mistake `C:/` for a relative path. Absolute paths clamp `..`
 /// at the root; relative paths retain leading `..`. An empty relative portion
-/// denotes the root, or `.` without a root. POSIX filenames retain backslashes.
+/// denotes the root, or `.` without a root. Components retain literal backslashes.
 /// This type does not access the filesystem or resolve symlinks.
+/// See [Linux filename rules](https://man7.org/linux/man-pages/man7/pathname.7.html)
+/// and [path resolution](https://man7.org/linux/man-pages/man7/path_resolution.7.html).
 pub struct Path {
   priv root : PathRoot
   priv relative : @posix.Path
@@ -45,56 +47,47 @@ pub impl Show for ResolveError with fn output(self, logger) {
 pub extend ResolveError with Show::{to_string, output}
 
 ///|
-/// Parse POSIX paths or Windows drive/UNC paths. Windows input is normalized
-/// at this boundary; all subsequent operations and output use `/` separators.
-/// Exactly two leading forward slashes select Windows UNC parsing; three or
-/// more select POSIX parsing.
-/// Absolute POSIX paths preserve backslashes occurring in file names.
-pub fn Path::Path(input : String) -> Path {
-  let has_drive = input is [drive, ':', ..] &&
-    ((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z'))
-  let has_unc_prefix = input.has_prefix("//") && !input.has_prefix("///")
-  let windows_input = has_drive ||
-    has_unc_prefix ||
-    (!input.has_prefix("/") && input.contains("\\"))
-  guard windows_input else {
-    let root = {
-      guard input.has_prefix("/") else { Relative }
-      Posix
-    }
-    Path::from_parts(root, input)
-  }
+fn has_drive_prefix(input : String) -> Bool {
+  input is [drive, ':', ..] &&
+  ((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z'))
+}
 
-  let windows = @win32.Path(input).normalize()
-  let windows_root = windows.root()
-  let root_text = windows_root.to_owned().replace_all(old="\\", new="/")
-  let root : PathRoot = {
-    guard !has_drive else {
-      let drive = root_text[:2].to_owned()
-      guard windows.is_absolute() else { DriveRelative(drive) }
+///|
+/// Parse uniform syntax with `/` separators, preserving literal backslashes.
+/// Roots use `/`, `C:/`, `C:`, or `//server/share/`; drive letters are ASCII.
+/// Three or more leading slashes denote a POSIX root.
+/// Use `from_windows` to parse Windows separators explicitly.
+pub fn Path::Path(input : String) -> Path {
+  guard !has_drive_prefix(input) else {
+    let drive = input[:2].to_owned()
+    let relative = input[2:].to_owned()
+    let root = {
+      guard relative.has_prefix("/") else { DriveRelative(drive) }
       Drive(drive)
     }
-    guard !root_text.has_prefix("//") else {
-      let parts = root_text
-        .split("/")
-        .filter(part => !part.is_empty())
-        .to_array()
-      guard parts is [server, share] else {
-        return Path::from_parts(
-          Posix,
-          Show::to_string(windows).replace_all(old="\\", new="/"),
-        )
-      }
-      UNC(server=server.to_owned(), share=share.to_owned())
-    }
-    guard windows.is_absolute() else { Relative }
-    Posix
+    Path::from_parts(root, relative)
   }
-  let text = Show::to_string(windows)
-  let relative = text[windows_root.length():]
-    .to_owned()
-    .replace_all(old="\\", new="/")
-  Path::from_parts(root, relative)
+  let has_unc_prefix = input.has_prefix("//") && !input.has_prefix("///")
+  guard !has_unc_prefix else {
+    let parts = input.split("/").filter(part => !part.is_empty()).to_array()
+    guard parts is [server, share, .. relative] else {
+      return Path::from_parts(Posix, input)
+    }
+    Path::from_parts(
+      UNC(server=server.to_owned(), share=share.to_owned()),
+      relative.join("/"),
+    )
+  }
+  Path::from_parts(if input.has_prefix("/") { Posix } else { Relative }, input)
+}
+
+///|
+/// Parse Windows drive, UNC, or relative syntax and convert its separators to
+/// `/` before entering the uniform representation.
+/// See [Windows naming rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
+pub fn Path::from_windows(input : String) -> Path {
+  let normalized = Show::to_string(@win32.Path(input).normalize())
+  Path::Path(normalized.replace_all(old="\\", new="/"))
 }
 
 ///|
@@ -112,8 +105,8 @@ fn Path::from_parts(root : PathRoot, relative : String) -> Path {
 
 ///|
 /// Append the relative portion of another normalized path, preserving this
-/// path's root. The other path's root is ignored. Input syntax and separators
-/// are handled by `Path::Path` before joining.
+/// path's root. The other path's root is ignored. Both operands are already
+/// parsed and normalized.
 pub fn Path::join(self : Path, other : Path) -> Path {
   let relative = self.relative.join(other.relative)
   Path::from_parts(self.root, Show::to_string(relative))
@@ -162,11 +155,17 @@ pub fn Path::basename(self : Path) -> String {
 }
 
 ///|
+/// Render the normalized path. Relative paths with a drive-like first component
+/// retain `./` to distinguish component names from drive roots.
+/// A POSIX component can contain `:`, and `.` denotes the current directory:
+/// [filename rules](https://man7.org/linux/man-pages/man7/pathname.7.html),
+/// [path resolution](https://man7.org/linux/man-pages/man7/path_resolution.7.html).
 pub impl Show for Path with fn to_string(self) {
   let relative = Show::to_string(self.relative)
   match self.root {
     Relative => {
       guard !relative.is_empty() else { "." }
+      guard !has_drive_prefix(relative) else { "./" + relative }
       relative
     }
     Posix => "/" + relative
