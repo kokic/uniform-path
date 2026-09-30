@@ -186,3 +186,20 @@ pub extend Path with Show::{to_string}
 
 ///|
 pub extend Path with Show::{output}
+
+///|
+/// Paths cross the wire as normalized strings, never as platform internals.
+pub impl ToJson for Path with fn to_json(self) {
+  self.to_string().to_json()
+}
+
+///|
+pub impl FromJson for Path with fn from_json(json, path) {
+  Path(FromJson::from_json(json, path))
+}
+
+///|
+pub extend Path with ToJson::{to_json}
+
+///|
+pub extend Path with FromJson::{from_json}
