@@ -125,6 +125,32 @@ pub fn Path::from_windows(input : String) -> Path {
 }
 
 ///|
+/// Parse a string returned by the host filesystem. Windows input uses
+/// `from_windows`; POSIX input preserves literal backslashes and treats
+/// drive-like names as ordinary components. Use `Path(input)` for uniform
+/// protocol strings, regardless of the host platform.
+/// JavaScript uses Node's platform when available, otherwise POSIX syntax.
+pub fn Path::from_native(input : String) -> Path {
+  guard !host_is_windows() else { return Path::from_windows(input) }
+  let root = if input.has_prefix("/") { Posix } else { Relative }
+  Path::from_parts(root, input)
+}
+
+///|
+/// Render according to the stored root, without consulting the host platform.
+/// Drive, drive-relative, UNC, and verbatim paths use Windows separators;
+/// POSIX and relative paths retain `/` and literal backslashes. This does not
+/// make a foreign path accessible on the host. Use `to_string` for uniform
+/// protocol strings and `to_windows` to explicitly request Windows syntax.
+/// Verbatim components and the root separator are preserved without normalization.
+pub fn Path::to_native(self : Path) -> String {
+  match self.root {
+    Drive(_) | DriveRelative(_) | UNC(..) | Verbatim(_, ..) => self.to_windows()
+    Relative | Posix => self.to_string()
+  }
+}
+
+///|
 /// Render a Windows path for native filesystem APIs, including the backslashes
 /// required by extended paths. Use `to_string` for the uniform wire format.
 /// Do not pass uniform `//?/` paths directly to native Windows file APIs.

@@ -1,6 +1,6 @@
 name = "kokic/uniform-path"
 
-version = "0.1.3"
+version = "0.1.4"
 
 import {
   "moonbitlang/x@0.5.5",
