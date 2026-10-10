@@ -125,18 +125,6 @@ pub fn Path::from_windows(input : String) -> Path {
 }
 
 ///|
-/// Parse a string returned by the host filesystem. Windows input uses
-/// `from_windows`; POSIX input preserves literal backslashes and treats
-/// drive-like names as ordinary components. Use `Path(input)` for uniform
-/// protocol strings, regardless of the host platform.
-/// JavaScript uses Node's platform when available, otherwise POSIX syntax.
-pub fn Path::from_native(input : String) -> Path {
-  guard !host_is_windows() else { return Path::from_windows(input) }
-  let root = if input.has_prefix("/") { Posix } else { Relative }
-  Path::from_parts(root, input)
-}
-
-///|
 /// Render according to the stored root, without consulting the host platform.
 /// Drive, drive-relative, UNC, and verbatim paths use Windows separators;
 /// POSIX and relative paths retain `/` and literal backslashes. This does not
