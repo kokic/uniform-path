@@ -8,13 +8,16 @@ priv enum PathRoot {
   Drive(String)
   DriveRelative(String)
   UNC(server~ : String, share~ : String)
+  // The root after //?/: a drive, UNC/server/share, or a namespace name.
+  Verbatim(String, has_separator~ : Bool)
 } derive(Eq)
 
 ///|
 /// Platform-independent lexical path with `/` separators.
 /// Roots are stored separately so POSIX normalization cannot collapse UNC's
 /// leading `//` or mistake `C:/` for a relative path. Absolute paths clamp `..`
-/// at the root; relative paths retain leading `..`. An empty relative portion
+/// at the root; relative paths retain leading `..`. Windows verbatim paths
+/// preserve their components without normalization. An empty relative portion
 /// denotes the root, or `.` without a root. Components retain literal backslashes.
 /// This type does not access the filesystem or resolve symlinks.
 /// See [Linux filename rules](https://man7.org/linux/man-pages/man7/pathname.7.html)
@@ -54,10 +57,14 @@ fn has_drive_prefix(input : String) -> Bool {
 
 ///|
 /// Parse uniform syntax with `/` separators, preserving literal backslashes.
-/// Roots use `/`, `C:/`, `C:`, or `//server/share/`; drive letters are ASCII.
+/// Roots use `/`, `C:/`, `C:`, `//server/share/`, or Windows `//?/` syntax;
+/// drive letters are ASCII. Verbatim paths preserve their components.
 /// Three or more leading slashes denote a POSIX root.
 /// Use `from_windows` to parse Windows separators explicitly.
 pub fn Path::Path(input : String) -> Path {
+  guard !input.has_prefix("//?/") else {
+    return Path::from_verbatim(input[4:].to_owned())
+  }
   guard !has_drive_prefix(input) else {
     let drive = input[:2].to_owned()
     let relative = input[2:].to_owned()
@@ -82,18 +89,52 @@ pub fn Path::Path(input : String) -> Path {
 }
 
 ///|
+/// Parse the namespace before considering ordinary UNC syntax. In particular,
+/// UNC's server and share belong to the root, not to the relative components.
+fn Path::from_verbatim(input : String) -> Path {
+  let (prefix, relative) = input.split_once("/").unwrap_or((input[:], ""))
+  let (root, relative) = if prefix.equal_ignore_ascii_case("UNC") &&
+    relative.split_once("/") is Some((server, tail)) {
+    let (share, relative) = tail.split_once("/").unwrap_or((tail, ""))
+    ("\{prefix}/\{server}/\{share}", relative)
+  } else {
+    (prefix.to_owned(), relative)
+  }
+  Path::from_parts(
+    Verbatim(root, has_separator=input.has_prefix(root + "/")),
+    relative.to_owned(),
+  )
+}
+
+///|
 /// Parse Windows drive, UNC, or relative syntax and convert its separators to
-/// `/` before entering the uniform representation.
+/// `/` before entering the uniform representation. Extended paths beginning
+/// with `\\?\` bypass normalization and retain their namespace.
 /// See [Windows naming rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
 pub fn Path::from_windows(input : String) -> Path {
+  guard !input.has_prefix("\\\\?\\") else {
+    return Path(input.replace_all(old="\\", new="/"))
+  }
   let normalized = Show::to_string(@win32.Path(input).normalize())
   Path::Path(normalized.replace_all(old="\\", new="/"))
 }
 
 ///|
+/// Render a Windows path for native filesystem APIs, including the backslashes
+/// required by extended paths. Use `to_string` for the uniform wire format.
+/// This converts separators; it does not validate Windows filename rules.
+pub fn Path::to_windows(self : Path) -> String {
+  self.to_string().replace_all(old="/", new="\\")
+}
+
+///|
 /// Normalize only the relative portion. A synthetic POSIX root prevents
 /// `..` from escaping an absolute root, including a drive or UNC share.
+/// Verbatim paths retain their components without normalization.
 fn Path::from_parts(root : PathRoot, relative : String) -> Path {
+  guard !(root is Verbatim(_, ..)) else {
+    return { root, relative: Path(relative), }
+  }
   let normalized = match root {
     Relative | DriveRelative(_) => @posix.Path(relative).normalize()
     _ => @posix.Path("/" + relative).normalize()
@@ -104,17 +145,28 @@ fn Path::from_parts(root : PathRoot, relative : String) -> Path {
 }
 
 ///|
-/// Append the relative portion of another normalized path, preserving this
-/// path's root. The other path's root is ignored. Both operands are already
-/// parsed and normalized.
+/// Append the relative portion of another path, preserving this
+/// path's root. The other path's root is ignored. Verbatim roots append the
+/// parsed components without further normalization.
 pub fn Path::join(self : Path, other : Path) -> Path {
-  let relative = self.relative.join(other.relative)
-  Path::from_parts(self.root, Show::to_string(relative))
+  guard self.root is Verbatim(root, ..) else {
+    let relative = self.relative.join(other.relative)
+    return Path::from_parts(self.root, Show::to_string(relative))
+  }
+  let left = Show::to_string(self.relative)
+  let right = Show::to_string(other.relative)
+  guard !right.is_empty() else { return self }
+  let relative = if left.is_empty() || left.has_suffix("/") {
+    left + right
+  } else {
+    left + "/" + right
+  }
+  Path::from_parts(Verbatim(root, has_separator=true), relative)
 }
 
 ///|
 /// Equivalent to `join`: append the right-hand path's relative portion,
-/// ignoring its root and preserving the left-hand path's root.
+/// ignoring its root and preserving the left-hand path's root and namespace.
 pub impl Div for Path with fn div(self : Path, other : Path) -> Path {
   self.join(other)
 }
@@ -123,29 +175,53 @@ pub impl Div for Path with fn div(self : Path, other : Path) -> Path {
 pub extend Path with Div::{div}
 
 ///|
-/// Resolve another normalized path against this explicit base without reading
-/// the host environment. Absolute POSIX, drive, and UNC paths replace the base;
+/// Resolve another path against this explicit base without reading the host
+/// environment. Absolute POSIX, drive, UNC, and verbatim paths replace the base;
 /// ordinary relative paths are joined to it. The result can remain relative.
+/// Leading `..` components in relative inputs walk the base's parents even
+/// when the base is verbatim; the base's remaining components are preserved.
 /// A drive-relative path is joined to a base on the same drive, comparing drive
 /// letters without case sensitivity and preserving the base's root.
 /// Raises `ResolveError::DriveBaseRequired` when that drive base is unavailable.
 pub fn Path::resolve(self : Path, other : Path) -> Path raise ResolveError {
   match other.root {
-    Relative => self / other
-    Posix | Drive(_) | UNC(..) => other
+    Relative => self.resolve_relative(other)
+    Posix | Drive(_) | UNC(..) | Verbatim(_, ..) => other
     DriveRelative(drive) =>
       match self.root {
-        Drive(base_drive) | DriveRelative(base_drive) if base_drive.equal_ignore_ascii_case(
-            drive,
-          ) => self / other
+        Drive(base_drive)
+        | DriveRelative(base_drive)
+        | Verbatim(base_drive, ..) if base_drive.equal_ignore_ascii_case(drive) =>
+          self.resolve_relative(other)
         _ => raise DriveBaseRequired(drive~, base=self)
       }
   }
 }
 
 ///|
+/// Ordinary relative inputs are already normalized, so only leading parent
+/// components remain. Consume those without normalizing the verbatim base.
+fn Path::resolve_relative(self : Path, other : Path) -> Path {
+  guard self.root is Verbatim(_, ..) else { return self / other }
+  let relative = Show::to_string(other.relative)
+  for base = self, tail = relative[:] {
+    guard tail != ".." else { break base.dirname() }
+    guard tail.strip_prefix("../") is Some(rest) else {
+      break base.join({ ..other, relative: Path(tail.to_owned()), })
+    }
+    continue base.dirname(), rest
+  }
+}
+
+///|
 /// Return the parent, stopping at POSIX, drive, and UNC share roots.
 pub fn Path::dirname(self : Path) -> Path {
+  guard !(self.root is Verbatim(_, ..)) else {
+    guard !Show::to_string(self.relative).is_empty() else { return self }
+    let rooted = @posix.Path("/" + Show::to_string(self.relative))
+    let parent = Show::to_string(rooted.dirname())
+    return Path::from_parts(self.root, parent[1:].to_owned())
+  }
   Path::from_parts(self.root, Show::to_string(self.relative.dirname()))
 }
 
@@ -155,7 +231,8 @@ pub fn Path::basename(self : Path) -> String {
 }
 
 ///|
-/// Render the normalized path. Relative paths with a drive-like first component
+/// Render the uniform path, retaining `//?/` for Windows verbatim namespaces.
+/// Relative paths with a drive-like first component
 /// retain `./` to distinguish component names from drive roots.
 /// A POSIX component can contain `:`, and `.` denotes the current directory:
 /// [filename rules](https://man7.org/linux/man-pages/man7/pathname.7.html),
@@ -172,6 +249,8 @@ pub impl Show for Path with fn to_string(self) {
     Drive(drive) => drive + "/" + relative
     DriveRelative(drive) => drive + relative
     UNC(server~, share~) => "//\{server}/\{share}/" + relative
+    Verbatim(root, has_separator~) =>
+      "//?/\{root}" + (if has_separator { "/" } else { "" }) + relative
   }
 }
 
@@ -187,7 +266,7 @@ pub extend Path with Show::{to_string}
 pub extend Path with Show::{output}
 
 ///|
-/// Paths cross the wire as normalized strings, never as platform internals.
+/// Paths cross the wire in uniform syntax, including verbatim namespaces.
 pub impl ToJson for Path with fn to_json(self) {
   self.to_string().to_json()
 }
