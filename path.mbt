@@ -20,6 +20,8 @@ priv enum PathRoot {
 /// preserve their components without normalization. An empty relative portion
 /// denotes the root, or `.` without a root. Components retain literal backslashes.
 /// This type does not access the filesystem or resolve symlinks.
+/// It does not validate filesystem names; preserving verbatim components does
+/// not make otherwise invalid names valid.
 /// See [Linux filename rules](https://man7.org/linux/man-pages/man7/pathname.7.html)
 /// and [path resolution](https://man7.org/linux/man-pages/man7/path_resolution.7.html).
 pub struct Path {
@@ -110,6 +112,9 @@ fn Path::from_verbatim(input : String) -> Path {
 /// Parse Windows drive, UNC, or relative syntax and convert its separators to
 /// `/` before entering the uniform representation. Extended paths beginning
 /// with `\\?\` bypass normalization and retain their namespace.
+/// Dot segments, trailing separators, spaces, and periods are preserved.
+/// For example, `\\?\D:\folder` becomes `//?/D:/folder`, and
+/// `\\?\UNC\server\share\folder` becomes `//?/UNC/server/share/folder`.
 /// See [Windows naming rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
 pub fn Path::from_windows(input : String) -> Path {
   guard !input.has_prefix("\\\\?\\") else {
@@ -122,7 +127,12 @@ pub fn Path::from_windows(input : String) -> Path {
 ///|
 /// Render a Windows path for native filesystem APIs, including the backslashes
 /// required by extended paths. Use `to_string` for the uniform wire format.
+/// Do not pass uniform `//?/` paths directly to native Windows file APIs.
+/// The root separator is preserved: `\\?\Volume{GUID}` names the volume,
+/// while `\\?\Volume{GUID}\` names its root directory.
 /// This converts separators; it does not validate Windows filename rules.
+/// See [Windows volume naming](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-volume)
+/// and [extended-path rules](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation).
 pub fn Path::to_windows(self : Path) -> String {
   self.to_string().replace_all(old="/", new="\\")
 }
@@ -148,6 +158,7 @@ fn Path::from_parts(root : PathRoot, relative : String) -> Path {
 /// Append the relative portion of another path, preserving this
 /// path's root. The other path's root is ignored. Verbatim roots append the
 /// parsed components without further normalization.
+/// A nonempty child adds a root separator if the verbatim base lacks one.
 pub fn Path::join(self : Path, other : Path) -> Path {
   guard self.root is Verbatim(root, ..) else {
     let relative = self.relative.join(other.relative)
@@ -180,6 +191,8 @@ pub extend Path with Div::{div}
 /// ordinary relative paths are joined to it. The result can remain relative.
 /// Leading `..` components in relative inputs walk the base's parents even
 /// when the base is verbatim; the base's remaining components are preserved.
+/// For example, resolving `../b` against `//?/D:/a` produces `//?/D:/b`.
+/// Parent traversal stops at the drive or UNC share root.
 /// A drive-relative path is joined to a base on the same drive, comparing drive
 /// letters without case sensitivity and preserving the base's root.
 /// Raises `ResolveError::DriveBaseRequired` when that drive base is unavailable.
@@ -267,6 +280,7 @@ pub extend Path with Show::{output}
 
 ///|
 /// Paths cross the wire in uniform syntax, including verbatim namespaces.
+/// JSON round trips preserve whether a verbatim root has a separator.
 pub impl ToJson for Path with fn to_json(self) {
   self.to_string().to_json()
 }
