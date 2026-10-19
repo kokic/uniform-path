@@ -296,7 +296,7 @@ pub extend Path with Show::{output}
 /// Paths cross the wire in uniform syntax, including verbatim namespaces.
 /// JSON round trips preserve whether a verbatim root has a separator.
 pub impl ToJson for Path with fn to_json(self) {
-  self.to_string().to_json()
+  Json(self.to_string())
 }
 
 ///|
